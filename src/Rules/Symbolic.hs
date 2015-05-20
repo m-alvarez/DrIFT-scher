@@ -1,10 +1,9 @@
 module Rules.Symbolic(rules) where
 
-import Data.List
-import RuleUtils
+import RuleUtils hiding (integer)
 import Control.Monad (guard)
-import RuleUtils as RU
-import Language.Haskell.Exts hiding (name)
+import qualified RuleUtils as RU
+import Language.Haskell.Exts hiding (name, var)
 import qualified Language.Haskell.Exts as Hs
 
 rules = [
@@ -88,32 +87,65 @@ makeInstance datatype =
 
 patId name = PVar (Ident name)
 
-symbolic arg = App (Hs.Var $ UnQual $ Ident "symbolic") arg
+call name args = foldl App (var name) args
 
-append e1 e2 = InfixApp e1 (QVarOp $ UnQual $ Ident "++") e2
+symbolic nameVar suffix = call "symbolic" [ append (var nameVar) (string suffix) ]
+
+append e1 e2 = InfixApp e1 (QVarOp $ UnQual $ Symbol "++") e2
+
+integer i = Lit $ Int (fromIntegral i)
+string s = Lit $ String s
+unit name = call "symbolicRange" [integer 0, integer 0, string name]
+
+var name = Hs.Var $ UnQual $ Ident name
+
+bind bindingName boundExpr =
+  Generator emptySrcLoc (PVar $ Ident bindingName) boundExpr
 
 mkBinding objName fieldName =
   Generator emptySrcLoc namePat symbolicExpr
-  where namePat = (PVar (Ident fieldName))
-        symbolicExpr = symbolic $ append objNameVar fieldNameStr
-        objNameVar = Hs.Var $ UnQual $ Ident objName
-        fieldNameStr = Lit $ String fieldName
+  where namePat = PVar (Ident fieldName)
+        symbolicExpr = symbolic "name" fieldName
+        objNameVar = var objName
 
+symbolicBind name suffix =
+  bind ("field" ++ suffix) $ symbolic name ("%" ++ suffix)
+
+ctorWitness body =
+  bind "ctor" $ symbolicRange "name" 0 0 ("%ctor=" ++ constructor body)
 
 mkSymbolicDeclCase body nameVar =
-  Do $ map (mkBinding nameVar) fieldNames
+  Do $ ctorWitness body : map (symbolicBind "name") fieldNames ++ [ ret ]
   where fieldNames =
           if null (labels body)
-            then map (("fld"++) . show) [1 .. length (types body)]
+            then map show [1 .. length (types body)]
             else labels body
+        ret = Qualifier $ call "return" [call (constructor body) 
+                                              (map (var.("field"++)) fieldNames)]
+
+symbolicRange nameVar i j suffix =
+  call "symbolicRange" [integer i, integer j, append (var nameVar) (string suffix)]
+
+icase expr cases =
+  Case expr alts
+  where alts = zipWith makeAlt [1 ..] cases
+        makeAlt i exp =
+          Alt emptySrcLoc 
+              (PLit Signless $ Int i)
+              (UnGuardedRhs exp)
+              (BDecls [])
 
 mkSymbolicDecl datatype =
-    InsDecl $ FunBind [
-        Match emptySrcLoc (Ident "symbolic") [PVar $ Ident "name"] Nothing rhs (BDecls [])
-      ]
-  where rhs = undefined --case (body datatype) of
-    --block -> mkSymbolicDeclCase body "name"
+  InsDecl $ FunBind [
+      Match emptySrcLoc (Ident "symbolic") [PVar $ Ident "name"] Nothing rhs (BDecls [])
+  ]
+  where rhs = UnGuardedRhs $ 
+                Do [ 
+                  bind "tag" $ symbolicRange "name" 1 (length $ body datatype) "%tag",
+                  Qualifier $ 
+                    icase (var "tag") [ mkSymbolicDeclCase b "name" | b <- body datatype ]
+                ]
 
 userRuleSymbolic datatype@D{name = name, vars = vars, body = body} =
-    undefined 
+  text $ prettyPrint $ mkSymbolicDecl datatype
 
