@@ -1,8 +1,6 @@
 module Rules.Symbolic(rules) where
 
-import RuleUtils hiding (integer)
-import Control.Monad (guard)
-import qualified RuleUtils as RU
+import qualified RuleUtils as Utils
 import Language.Haskell.Exts hiding (name, var)
 import qualified Language.Haskell.Exts as Hs
 
@@ -10,142 +8,106 @@ rules = [
     ("Symbolic", userRuleSymbolic, "Debugging", "Derive Symbolic for scher", Nothing)
     ]
 
-{- datatype that rules manipulate :-
-
-
-data Data = D {	name :: Name,			 -- type's name
-			constraints :: [(Class,Var)],
-			vars :: [Var],		 -- Parameters
-			body :: [Body],
-			derives :: [Class],	 -- derived classes
-			statement :: Statement}  -- type of statement
-	   | Directive				 --|
-	   | TypeName Name			 --| used by derive (ignore)
-		deriving (Eq,Show)
-
-data Body = Body { constructor :: Constructor,
-		    labels :: [Name], -- [] for a non-record datatype.
-		    types :: [Type]} deriving (Eq,Show)
-
-data Statement = DataStmt | NewTypeStmt deriving (Eq,Show)
-
-type Name = String
-type Var = String
-type Class = String
-type Constructor = String
-
-type Rule = (Tag, Data->Doc)
-
--}
-
+applyTypes :: Type -> [Type] -> Type
 applyTypes typ [] = typ
 applyTypes typ (t:ts) = applyTypes (TyApp typ t) ts
 
+mkTypeUse :: Utils.Data -> Type
 mkTypeUse datatype =
-  applyTypes (TyCon (UnQual (Ident $ name datatype))) (map (TyVar . Ident) (vars datatype))
+  applyTypes (TyCon (UnQual (Ident $ Utils.name datatype))) 
+             (map (TyVar . Ident) (Utils.vars datatype))
 
+emptySrcLoc :: SrcLoc
 emptySrcLoc = SrcLoc { srcFilename = "", srcLine = 0, srcColumn = 0 }
 
+nSymbolic :: QName
 nSymbolic = UnQual (Ident "Symbolic")
 
-hasTypeVariables t =
-  case t of
-    RU.Arrow t1 t2 -> hasTypeVariables t1 || hasTypeVariables t2
-    RU.LApply t l  -> hasTypeVariables t || any hasTypeVariables l
-    RU.Var s -> True
-    RU.Con s -> False
-    RU.Tuple ts -> any hasTypeVariables ts
-    RU.List t -> hasTypeVariables t
+mkContext :: Utils.Data -> Context
+mkContext datatype =
+  map (symbolicA . TyVar . Ident) (Utils.vars datatype)
 
-mkConstraint t = ClassA nSymbolic [typeToSrcType t]
+symbolicA :: Type -> Asst
+symbolicA typ = ClassA nSymbolic [typ]
 
-typeToSrcType t =
-  case t of
-    RU.Arrow t1 t2 -> TyFun (typeToSrcType t1) (typeToSrcType t2)
-    RU.LApply t ts -> applyTypes (typeToSrcType t) (map typeToSrcType ts)
-    RU.Var s       -> TyVar (Ident s)
-    RU.Con s       -> TyCon (UnQual (Ident s))
-    RU.Tuple ts    -> TyTuple Boxed (map typeToSrcType ts)
-    RU.List t      -> TyList (typeToSrcType t)
-
-mkConstraintList body = do
-  t <- types body
-  guard $ hasTypeVariables t
-  return $ mkConstraint t
-
-mkContext datatype = do
-  l <- body datatype
-  mkConstraintList l
-
-makeInstance datatype =
-  InstDecl loc Nothing bindings ctx nSymbolic typ dec
-  where ctx = mkContext datatype
-        typ = [mkTypeUse datatype]
-        dec = [mkSymbolicDecl datatype]
-        loc = SrcLoc { srcFilename = "", srcLine = 0, srcColumn = 0 }
-        bindings = []
-
-patId name = PVar (Ident name)
-
+call :: String -> [Exp] -> Exp
 call name args = foldl App (var name) args
 
+symbolic :: String -> String -> Exp
 symbolic nameVar suffix = call "symbolic" [ append (var nameVar) (string suffix) ]
 
+append :: Exp -> Exp -> Exp
 append e1 e2 = InfixApp e1 (QVarOp $ UnQual $ Symbol "++") e2
 
-integer i = Lit $ Int (fromIntegral i)
-string s = Lit $ String s
-unit name = call "symbolicRange" [integer 0, integer 0, string name]
+integer :: (Integral i) => i -> Exp 
+integer i = Lit $ Int $ fromIntegral i
 
+string :: String -> Exp
+string s = Lit $ String s
+
+var :: String -> Exp
 var name = Hs.Var $ UnQual $ Ident name
 
+bind :: String -> Exp -> Stmt
 bind bindingName boundExpr =
   Generator emptySrcLoc (PVar $ Ident bindingName) boundExpr
 
-mkBinding objName fieldName =
-  Generator emptySrcLoc namePat symbolicExpr
-  where namePat = PVar (Ident fieldName)
-        symbolicExpr = symbolic "name" fieldName
-        objNameVar = var objName
-
+symbolicBind :: String -> String -> Stmt
 symbolicBind name suffix =
   bind ("field" ++ suffix) $ symbolic name ("%" ++ suffix)
 
-ctorWitness body =
-  bind "ctor" $ symbolicRange "name" 0 0 ("%ctor=" ++ constructor body)
-
-mkSymbolicDeclCase body nameVar =
-  Do $ ctorWitness body : map (symbolicBind "name") fieldNames ++ [ ret ]
+mkSymbolicDeclCase :: Utils.Body -> Exp
+mkSymbolicDeclCase body =
+  Do $ map (symbolicBind "name") fieldNames ++ [ ret ]
   where fieldNames =
-          if null (labels body)
-            then map show [1 .. length (types body)]
-            else labels body
-        ret = Qualifier $ call "return" [call (constructor body) 
+          if null (Utils.labels body)
+            then map show [1 .. length (Utils.types body)]
+            else Utils.labels body
+        ret = Qualifier $ call "return" [call (Utils.constructor body) 
                                               (map (var.("field"++)) fieldNames)]
 
+symbolicRange :: Exp -> Int -> Int -> String -> Exp
 symbolicRange nameVar i j suffix =
-  call "symbolicRange" [integer i, integer j, append (var nameVar) (string suffix)]
+  call "symbolicRange" [integer i, integer j, append nameVar (string suffix)]
 
+icase :: Exp -> [Exp] -> Exp
 icase expr cases =
   Case expr alts
   where alts = zipWith makeAlt [1 ..] cases
-        makeAlt i exp =
+        makeAlt i e =
           Alt emptySrcLoc 
               (PLit Signless $ Int i)
-              (UnGuardedRhs exp)
+              (UnGuardedRhs e)
               (BDecls [])
 
-mkSymbolicDecl datatype =
-  InsDecl $ FunBind [
-      Match emptySrcLoc (Ident "symbolic") [PVar $ Ident "name"] Nothing rhs (BDecls [])
-  ]
-  where rhs = UnGuardedRhs $ 
-                Do [ 
-                  bind "tag" $ symbolicRange "name" 1 (length $ body datatype) "%tag",
-                  Qualifier $ 
-                    icase (var "tag") [ mkSymbolicDeclCase b "name" | b <- body datatype ]
-                ]
+constructorChoice :: Exp -> [Utils.Body] -> Exp
+constructorChoice nameVar constructors = 
+  symbolicRange nameVar 1 (length constructors) ("%Constructor%" ++ constructorNames)
+  where constructorNames = show $ map Utils.constructor constructors
 
-userRuleSymbolic datatype@D{name = name, vars = vars, body = body} =
-  text $ prettyPrint $ mkSymbolicDecl datatype
+mkSymbolicDecl :: Utils.Data -> InstDecl
+mkSymbolicDecl datatype =
+    InsDecl $ FunBind [
+      Match emptySrcLoc (Ident "symbolic") [PVar $ Ident "name"] Nothing rhs (BDecls [])
+    ]
+  where nameVar = var "name"
+        rhs = 
+          UnGuardedRhs $ Do [ 
+            bind "tag" $ constructorChoice nameVar (Utils.body datatype),
+            Qualifier $ icase (var "tag") [ mkSymbolicDeclCase b | b <- Utils.body datatype ]
+          ]
+
+makeInstance :: Utils.Data -> Decl
+makeInstance datatype =
+  InstDecl emptySrcLoc Nothing bindings ctx nSymbolic typ dec
+  where ctx = mkContext datatype
+        typ = [mkTypeUse datatype]
+        dec = [mkSymbolicDecl datatype]
+        bindings = []
+
+userRuleSymbolic :: Utils.Data -> Utils.Doc
+userRuleSymbolic datatype@(Utils.D _ _ _ _ _ _) =
+  Utils.text $ prettyPrint $ makeInstance datatype
+userRuleSymbolic Utils.Directive = error "Cannot generate symbolic instance for a directive"
+userRuleSymbolic (Utils.TypeName _) = error "Cannot generate symbolic instance for typename"
 
