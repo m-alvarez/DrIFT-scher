@@ -34,7 +34,7 @@ call :: String -> [Exp] -> Exp
 call name args = foldl App (var name) args
 
 symbolic :: String -> String -> Exp
-symbolic nameVar suffix = call "symbolic" [ append (var nameVar) (string suffix) ]
+symbolic nameVar suffix = call "make" [ append (var nameVar) (string suffix) ]
 
 append :: Exp -> Exp -> Exp
 append e1 e2 = InfixApp e1 (QVarOp $ UnQual $ Symbol "++") e2
@@ -68,7 +68,7 @@ mkSymbolicDeclCase body =
 
 symbolicRange :: Exp -> Int -> Int -> String -> Exp
 symbolicRange nameVar i j suffix =
-  call "symbolicRange" [integer i, integer j, append nameVar (string suffix)]
+  call "makeRange" [integer i, integer j, append nameVar (string suffix)]
 
 icase :: Exp -> [Exp] -> Exp
 icase expr cases =
@@ -82,7 +82,7 @@ icase expr cases =
 
 constructorChoice :: Exp -> [Utils.Body] -> Exp
 constructorChoice nameVar constructors = 
-  symbolicRange nameVar 1 (length constructors) ("%Constructor%" ++ constructorNames)
+  symbolicRange nameVar 1 (min (length constructors + 1) 3) ("%Constructor%" ++ constructorNames)
   where constructorNames = show $ map Utils.constructor constructors
 
 mkSymbolicDecl :: Utils.Data -> InstDecl
@@ -94,7 +94,9 @@ mkSymbolicDecl datatype =
         rhs = 
           UnGuardedRhs $ Do [ 
             bind "tag" $ constructorChoice nameVar (Utils.body datatype),
-            Qualifier $ icase (var "tag") [ mkSymbolicDeclCase b | b <- Utils.body datatype ]
+            if length (Utils.body datatype) == 1
+            then Qualifier $ If ()
+            else Qualifier $ icase (var "tag") [ mkSymbolicDeclCase b | b <- Utils.body datatype ]
           ]
 
 makeInstance :: Utils.Data -> Decl
