@@ -95,7 +95,8 @@ mkSymbolicDecl datatype =
           UnGuardedRhs $ Do [ 
             bind "tag" $ constructorChoice nameVar (Utils.body datatype),
             if length (Utils.body datatype) == 1
-            then Qualifier $ If ()
+            then Qualifier $ Case (call "(==)" []) 
+                    [ Alt emptySrcLoc (PApp (UnQual $ Ident "True") []) (UnGuardedRhs $ mkSymbolicDeclCase b) (BDecls []) | b <- Utils.body datatype ]
             else Qualifier $ icase (var "tag") [ mkSymbolicDeclCase b | b <- Utils.body datatype ]
           ]
 
